@@ -18,6 +18,7 @@ class DisplayDataChannel {
     private let avService: IOAVService
     var readDelayMs: Int = 40
     var writeDelayMs: Int = 50
+    var i2cChipAddress: UInt32 = 0x37
 
     init?(for ioLocation: String) {
         let ioRootEntry = IORegistryGetRootEntry(kIOMasterPortDefault)
@@ -37,7 +38,10 @@ class DisplayDataChannel {
             if service == MACH_PORT_NULL { return nil }
 
             let path = IOString({ buf in IORegistryEntryGetPath(service, kIOServicePlane, buf) })
-            if path == ioLocation { break }
+            if path == ioLocation {
+                self.i2cChipAddress = DisplayDataChannel.detectI2CChipAddress(service: service)
+                break
+            }
         }
 
         // Find AVService Proxy
@@ -56,6 +60,15 @@ class DisplayDataChannel {
             }
         }
         return nil
+    }
+
+    static func detectI2CChipAddress(service: io_object_t) -> UInt32 {
+        print("Detecting I2C chip address for service \(service)")
+        var parent = io_registry_entry_t();
+        if IORegistryEntryGetParentEntry(service, kIOServicePlane, &parent) == KERN_SUCCESS {
+            print("Parent entry found: \(parent)")
+        }
+        return 0x37 // Default I2C chip address
     }
 
     struct Packet {
@@ -91,7 +104,7 @@ class DisplayDataChannel {
     func i2cRead(addr: UInt8, size: Int, waitMs: Int = 50) async throws -> Packet {
         var packet = Packet(addr: addr, data: [UInt8](repeating: 0, count: size))
         try await Task.sleep(nanoseconds: UInt64(waitMs) * 1000 * 1000)
-        let err = IOAVServiceReadI2C(self.avService, 0x37, UInt32(addr), &packet.data, UInt32(packet.data.count))
+        let err = IOAVServiceReadI2C(avService, i2cChipAddress, UInt32(addr), &packet.data, UInt32(packet.data.count))
         if err != 0 { throw IOError(message: "I2C Read Failed", rawValue: err) }
         return packet
     }
@@ -100,7 +113,7 @@ class DisplayDataChannel {
         for _ in 0..<retry {
             try await Task.sleep(nanoseconds: UInt64(waitMs) * 1000 * 1000)
             err = packet.data.withUnsafeBytes { ptr in
-                IOAVServiceWriteI2C(self.avService, 0x37, UInt32(packet.addr), ptr.baseAddress, UInt32(ptr.count))
+                IOAVServiceWriteI2C(avService, i2cChipAddress, UInt32(packet.addr), ptr.baseAddress, UInt32(ptr.count))
             }
             if err == 0 { return }
         }
@@ -136,8 +149,11 @@ class DisplayDataChannel {
             self.addr = addr
         }
 
+        static let brightness = VCPAttribute(name: "brightness", id: 0x10)
+        static let contrast = VCPAttribute(name: "contrast", id: 0x12)
         static let volume = VCPAttribute(name: "volume", id: 0x62)
         static let input = VCPAttribute(name: "input", id: 0x60)
+        static let power = VCPAttribute(name: "power", id: 0xd6)
 
         static func from(id: UInt8, addr: UInt8) -> VCPAttribute {
             for attr in allStaticMembers {
